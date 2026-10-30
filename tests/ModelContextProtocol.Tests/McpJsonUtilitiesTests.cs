@@ -1,0 +1,147 @@
+﻿using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
+using ModelContextProtocol.Protocol;
+
+namespace ModelContextProtocol.Tests;
+
+public static class McpJsonUtilitiesTests
+{
+    [Fact]
+    public static void DefaultOptions_IsSingleton()
+    {
+        var options = McpJsonUtilities.DefaultOptions;
+
+        Assert.NotNull(options);
+        Assert.True(options.IsReadOnly);
+        Assert.Same(options, McpJsonUtilities.DefaultOptions);
+    }
+
+    [Fact]
+    public static void DefaultOptions_MatchesPropertyNamesCaseInsensitively()
+    {
+        var options = McpJsonUtilities.DefaultOptions;
+
+        Assert.True(options.PropertyNameCaseInsensitive);
+
+        if (JsonSerializer.IsReflectionEnabledByDefault)
+        {
+            var query = JsonSerializer.Deserialize<WeatherQuery>("""{"CITY":"Hefei"}""", options);
+            Assert.Equal("Hefei", query?.City);
+        }
+    }
+
+    private sealed class WeatherQuery
+    {
+        public string? City { get; set; }
+    }
+
+    [Fact]
+    public static void ProtocolOptions_IsSingletonAndMatchesPropertyNamesCaseSensitively()
+    {
+        var options = McpJsonUtilities.ProtocolOptions;
+
+        Assert.NotNull(options);
+        Assert.True(options.IsReadOnly);
+        Assert.Same(options, McpJsonUtilities.ProtocolOptions);
+        Assert.NotSame(McpJsonUtilities.DefaultOptions, options);
+        Assert.False(options.PropertyNameCaseInsensitive);
+    }
+
+    [Fact]
+    public static void ProtocolOptions_DoesNotBindAlternatelyCasedErrorDetail()
+    {
+        const string Json = """{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"boom","Code":1,"Message":"other"}}""";
+
+        var message = JsonSerializer.Deserialize(Json, McpJsonUtilities.ProtocolOptions.GetTypeInfo<JsonRpcMessage>());
+        var error = Assert.IsType<JsonRpcError>(message);
+        Assert.Equal(-32603, error.Error.Code);
+        Assert.Equal("boom", error.Error.Message);
+
+        // DefaultOptions keeps case-insensitive matching, so the later spelling wins there.
+        message = JsonSerializer.Deserialize(Json, McpJsonUtilities.DefaultOptions.GetTypeInfo<JsonRpcMessage>());
+        error = Assert.IsType<JsonRpcError>(message);
+        Assert.Equal(1, error.Error.Code);
+        Assert.Equal("other", error.Error.Message);
+    }
+
+    [Fact]
+    public static void ProtocolOptions_DoesNotBindAlternatelyCasedCallToolResultFields()
+    {
+        const string Json = """{"content":[{"type":"text","text":"ok"}],"Content":[],"IsError":true}""";
+
+        var result = JsonSerializer.Deserialize(Json, McpJsonUtilities.ProtocolOptions.GetTypeInfo<CallToolResult>());
+        Assert.NotNull(result);
+        Assert.Equal("ok", Assert.IsType<TextContentBlock>(Assert.Single(result.Content)).Text);
+        Assert.Null(result.IsError);
+
+        result = JsonSerializer.Deserialize(Json, McpJsonUtilities.DefaultOptions.GetTypeInfo<CallToolResult>());
+        Assert.NotNull(result);
+        Assert.Empty(result.Content);
+        Assert.True(result.IsError);
+    }
+
+    [Fact]
+    public static void DefaultOptions_UseReflectionWhenEnabled()
+    {
+        var options = McpJsonUtilities.DefaultOptions;
+        Type anonType = new { Id = 42 }.GetType();
+
+        Assert.Equal(JsonSerializer.IsReflectionEnabledByDefault, options.TryGetTypeInfo(anonType, out _));
+    }
+
+    [Fact]
+    public static void DefaultOptions_UnknownEnumHandling()
+    {
+        var options = McpJsonUtilities.DefaultOptions;
+
+        if (JsonSerializer.IsReflectionEnabledByDefault)
+        {
+            Assert.Equal("\"A\"", JsonSerializer.Serialize(EnumWithoutAnnotation.A, options));
+            Assert.Equal("\"A\"", JsonSerializer.Serialize(EnumWithAnnotation.A, options));
+        }
+        else
+        {
+            options = new(options) { TypeInfoResolver = new DefaultJsonTypeInfoResolver() };
+            Assert.Equal("1", JsonSerializer.Serialize(EnumWithoutAnnotation.A, options));
+            Assert.Equal("\"A\"", JsonSerializer.Serialize(EnumWithAnnotation.A, options));
+        }
+    }
+
+    [Fact]
+    public static void DefaultOptions_CanSerializeIEnumerableOfContentBlock()
+    {
+        var options = McpJsonUtilities.DefaultOptions;
+        
+        // Create an IEnumerable<ContentBlock> with different content types
+        IEnumerable<ContentBlock> contentBlocks = new List<ContentBlock>
+        {
+            new TextContentBlock { Text = "Hello World" },
+            new TextContentBlock { Text = "Test message" }
+        };
+
+        // Should not throw NotSupportedException
+        string json = JsonSerializer.Serialize(contentBlocks, options);
+        
+        Assert.NotNull(json);
+        Assert.Contains("Hello World", json);
+        Assert.Contains("Test message", json);
+        Assert.Contains("\"type\":\"text\"", json);
+        
+        // Should also be able to deserialize back
+        var deserialized = JsonSerializer.Deserialize<IEnumerable<ContentBlock>>(json, options);
+        Assert.NotNull(deserialized);
+        var deserializedList = deserialized.ToList();
+        Assert.Equal(2, deserializedList.Count);
+        Assert.All(deserializedList, cb => Assert.Equal("text", cb.Type));
+        
+        var textBlocks = deserializedList.Cast<TextContentBlock>().ToArray();
+        Assert.Equal("Hello World", textBlocks[0].Text);
+        Assert.Equal("Test message", textBlocks[1].Text);
+    }
+
+    public enum EnumWithoutAnnotation { A = 1, B = 2, C = 3 }
+
+    [JsonConverter(typeof(JsonStringEnumConverter<EnumWithAnnotation>))]
+    public enum EnumWithAnnotation { A = 1, B = 2, C = 3 }
+}
